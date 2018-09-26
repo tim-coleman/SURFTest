@@ -6,18 +6,21 @@ library(ggplot2)
 library(rpart)
 library(dplyr)
 library(party)
+library(glmnet)
 library(randomForest)
 
 ##########################################
 ## Function to subsample various trees
 ##########################################
 bag.s <- function(X, y, base.learner = "rpart", ntree, k, mtry = ncol(X),
-                  form = ifelse(base.learner %in% c("rpart", "ctree"), as.formula("y~."), NULL)){
+                  form = if(base.learner %in% c("rpart", "ctree", "lm")) as.formula("y~."),
+                  alpha = if(base.learner == "lm") 1,
+                  lambda = if(base.learner == "lm") 1){
 
   D <- data.frame(X, y)
 
-  if(!(base.learner %in% c("rpart", "ctree", "rtree"))){
-    stop("Base learner should be one of 'rpart', 'ctree' or 'rtree' ")
+  if(!(base.learner %in% c("rpart", "ctree", "rtree", "lm"))){
+    stop("Base learner should be one of 'rpart', 'ctree', 'lm' or 'rtree' ")
   }
 
   if(nrow(D) == 0) stop("data (D) has 0 rows")
@@ -48,6 +51,14 @@ bag.s <- function(X, y, base.learner = "rpart", ntree, k, mtry = ncol(X),
                    sampsize = floor(k))
     }
 
+  }
+  
+  if(base.learner == "lm"){
+    fun = function(){
+      ind <- sample(1:nrow(D), size=k, replace=FALSE)
+      features <- model.matrix(form, data = D[ind,])
+      glmnet(x = features, y = y[ind], alpha = alpha, lambda = lambda)      
+    }
   }
 
   rfs <- list()
@@ -96,10 +107,16 @@ MSE_Test.default <- function(X, y,  X.test = FALSE, y.test = FALSE,
                  ntree = NTree, k = ceiling(N^p), mtry = mtry, form.resp)
   rf_pm <- bag.s(X = X.train.pm, y = y.train, base.learner = base.learner,
                  ntree = NTree, k = ceiling(N^p), mtry = mtry, form.resp)
-
+  if(base.learner == "lm"){
+    #print(head(data.frame(X.test, "y" = y.test)))
+    #print(head(model.matrix(form.resp, data = data.frame(X.test, "y" = y.test))))
+    P <- data.frame(lapply(rf_og, predict, newx = model.matrix(form.resp, data = data.frame(X.test, "y" = y.test))))
+    PR <- data.frame(lapply(rf_pm, predict, newx = model.matrix(form.resp, data = data.frame(X.test, "y" = y.test))))
+  }
+  else{
   P <- data.frame(lapply(rf_og, predict, newdata = X.test))
   PR <- data.frame(lapply(rf_pm, predict, newdata = X.test))
-
+  }
   Pred_0 <- apply(P, FUN = mean, MARGIN = 1)
   Pred_R_0 <- apply(PR, FUN = mean, MARGIN = 1)
 
@@ -256,9 +273,9 @@ plot.permtestImp <- function(obj, col_blind = F){
                               c(".01", ".05", ".1", "Not Significant")))
   if(!col_blind){
   g <- ggplot(aes(x = Variable), data = df) +
-    geom_point(aes(y = SDImportance, col = signifcode), fill = '#6FD6FF', size = 3.5) + 
+    geom_point(aes(y = SDImportance, col = signifcode), size = 3.5) + 
     coord_flip() + theme_classic() + ggtitle(title.perm) + ylab("Standard Deviation Importance") +
-    scale_colour_manual(values = rev(c("#000000", "#7D4646", "#FA8C8C", "#FF2200")), 
+    scale_colour_manual(values = rev(c("#000000", "#FF8075", "#FF5C55", "#FF3834")), 
                         name = "Significance \nLevel")+
     theme(plot.title = element_text(size = 21, hjust = .5), axis.title = element_text(size = 15),
           axis.text.y = element_text(size = 18),
