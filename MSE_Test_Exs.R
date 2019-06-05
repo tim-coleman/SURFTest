@@ -7,7 +7,8 @@ set.seed(1500)
 
 ## Remote Loading
 library(devtools)
-#source_url("https://raw.githubusercontent.com/tim-coleman/SURFTest/master/MSE_Test_File.R")
+source_url("https://raw.githubusercontent.com/tim-coleman/SURFTest/master/MSE_Test_File.R")
+#^ may not work on government machines, try local loading :) 
 
 ## Generating dummy data
 
