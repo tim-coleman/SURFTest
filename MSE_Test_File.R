@@ -14,7 +14,7 @@ library(randomForest)
 ## Function to subsample various models
 ##########################################
 bag.s <- function(X, y, base.learner = "rpart", ntree, k, mtry = ncol(X),
-                  form = as.formula("y~."),
+                  form = as.formula("y~."), return_ind = F,
                   alpha = if(base.learner == "lm") 1 else NULL ,
                   glm_cv = if(base.learner == "lm") "external" else "none", 
                   lambda = if(glm_cv == "none" & base.learner == "lm") 1 else NULL,
@@ -25,52 +25,62 @@ bag.s <- function(X, y, base.learner = "rpart", ntree, k, mtry = ncol(X),
   resp_name <- as.character(form)[2]
   D <- data.frame(X, "y" = y)
   names(D)[ncol(X) + 1] <- resp_name
-
+  
   if(!(base.learner %in% c("rpart", "ctree", "rtree", "lm"))){
     stop("Base learner should be one of 'rpart', 'ctree', 'lm' or 'rtree' ")
   }
-
+  
   if(nrow(D) == 0) stop("data (D) has 0 rows")
-
+  
   if(base.learner == "rpart"){
     c.sim <- rpart.control(minsplit=10, maxcompete=0, maxsurrogate=0, usesurrogate=0, cp = 0)
     fun = function(){
       ind <- sample(1:nrow(D), size=k, replace=FALSE)
-      rpart(form, data = D[ind,], control = c.sim)
+      return(list("model" = rpart(form, data = D[ind,], control = c.sim),
+                  "ind" = ind))
     }
   }
-
+  
   if(base.learner == "ctree"){
     if(ranger){
-      fun = function(){ranger(form, num.trees = 1, mtry = mtry, importance = 'none', data = D,
-             min.node.size = 1, replace = F, sample.fraction = k/nrow(D), splitrule = "maxstat")}
-    }
-    else{
-    c.sim <- ctree_control(minsplit=1,
-                           maxsurrogate=0, mtry = mtry,
-                           mincriterion = .3)
-    fun = function(){
-      ind <- sample(1:nrow(D), size=k, replace=FALSE)
-      ctree(form, controls = c.sim, data = D[ind,])
-    }
-    }
-  }
-    
-
-  if(base.learner == "rtree") {
-    if(ranger){
-      fun =  function(){ranger(form, num.trees = 1, mtry = mtry, importance = 'none', data = D,
-             min.node.size = 1, replace = F, sample.fraction = k/nrow(D))
+      fun = function(){
+        ind <- sample(1:nrow(D), size=k, replace=FALSE)
+        return(list("model" = ranger(form, num.trees = 1, mtry = mtry, importance = 'none', data = D[ind,],
+                                     min.node.size = 1, replace = F, sample.fraction = 1, splitrule = "maxstat"),
+                    "ind" = ind))
       }
     }
     else{
-    fun = function(){
-      randomForest(x = X, y = y, ntree = 1, mtry = mtry,
-                   replace = FALSE,
-                   sampsize = floor(k))
+      c.sim <- ctree_control(minsplit=1,
+                             maxsurrogate=0, mtry = mtry,
+                             mincriterion = .3)
+      fun = function(){
+        ind <- sample(1:nrow(D), size=k, replace=FALSE)
+        return(list("model" = ctree(form, controls = c.sim, data = D[ind,]), 
+                    "ind" = ind))
+      }
     }
+  }
+  
+  
+  if(base.learner == "rtree") {
+    if(ranger){
+      fun =  function(){        
+        ind <- sample(1:nrow(D), size=k, replace=FALSE)
+        return(list("model" = ranger(form, num.trees = 1, mtry = mtry, importance = 'none', data = D[ind,],
+                                     min.node.size = 1, replace = F, sample.fraction = 1),
+                    "ind" = ind))
+      }
     }
-
+    else{
+      fun = function(){
+        ind <- sample(1:nrow(D), size = k, replace = FALSE)
+        return(list("model" = randomForest(x = X[ind,], y = y[ind], ntree = 1, mtry = mtry,
+                                           replace = FALSE,
+                                           sampsize = floor(k)), "ind" = ind))
+      }
+    }
+    
   }
   
   if(base.learner == "lm"){
@@ -80,37 +90,41 @@ bag.s <- function(X, y, base.learner = "rpart", ntree, k, mtry = ncol(X),
       fun = function(){
         ind <- sample(1:nrow(D), size=k, replace=FALSE)
         features <- model.matrix(form, data = D[ind,])
-        return(glmnet(x = features, y = y[ind], alpha = alpha, lambda = l_cv))
+        return(list("model" = glmnet(x = features, y = y[ind], alpha = alpha, lambda = l_cv),
+                    "ind" = ind))
       }
     }
     else{
-    fun = function(){
-      ind <- sample(1:nrow(D), size=k, replace=FALSE)
-      features <- model.matrix(form, data = D[ind,])
-      if(glm_cv == "none"){
-      return(glmnet(x = features, y = y[ind], alpha = alpha, lambda = lambda))
-      }
-      else{
-        return(cv.glmnet(x = features, y = y[ind], alpha = alpha, nfolds = 5))
+      fun = function(){
+        ind <- sample(1:nrow(D), size=k, replace=FALSE)
+        features <- model.matrix(form, data = D[ind,])
+        if(glm_cv == "none"){
+          return(list("model" = glmnet(x = features, y = y[ind], alpha = alpha, lambda = lambda),
+                      "ind" = ind))
+        }
+        else{
+          return(list("model" = cv.glmnet(x = features, y = y[ind], alpha = alpha, nfolds = 5), 
+                      "ind" = ind))
+        }
       }
     }
-    }
   }
-
-  rfs <- list()
-  for(i in 1:ntree){
-    rfs[[i]] <- fun()
+  
+  rfs <- lapply(1:ntree, function(x) fun())
+  
+  if(!return_ind){
+    rfs <- lapply(rfs, function(x) x[["model"]])
   }
+  
   if(ranger & base.learner %in% c("rtree", "ctree")){
     class(rfs) <- paste("bagged", base.learner, "ranger", sep = "_")
     
   }
   else{
-  class(rfs) <- paste("bagged", base.learner, sep = "_")
+    class(rfs) <- paste("bagged", base.learner, sep = "_")
   }
   rfs
 }
-
 
 ##########################################
 ## Function to run the test.
@@ -157,6 +171,7 @@ MSE_Test.default <- function(X, y,  X.test = FALSE, y.test = FALSE,
                  ntree = NTree, k = ceiling(N^p), mtry = mtry, form = form.resp,
                  alpha = alpha, lambda = lambda, ranger = ranger, glm_cv = glm_cv)
 
+  cat("Finished model training ...\n")
   pred_f <- function(model){
     if(class(model) %in% c("bagged_rtree", "bagged_ctree", "bagged_rpart")){
       P <- data.frame(lapply(model, FUN = function(x) predict(x, newdata = X.test)))
@@ -167,11 +182,21 @@ MSE_Test.default <- function(X, y,  X.test = FALSE, y.test = FALSE,
     else{
       if(is.null(y.test)){y.dummy <- rep(0, nrow(X.test))}
       else{y.dummy <- y.test}
-      form.resp <- as.formula("y~.+0")
+      form.resp <- as.formula("y~.")
       P <- data.frame(lapply(model, predict, newx = model.matrix(form.resp, data.frame(X.test, "y" = y.test))))
     }
     P
   }
+  # if(base.learner == "lm"){
+  #   #print(head(data.frame(X.test, "y" = y.test)))
+  #   #print(head(model.matrix(form.resp, data = data.frame(X.test, "y" = y.test))))
+  #   P <- data.frame(lapply(rf_og, predict, newx = model.matrix(form.resp, data = data.frame(X.test, "y" = y.test))))
+  #   PR <- data.frame(lapply(rf_pm, predict, newx = model.matrix(form.resp, data = data.frame(X.test, "y" = y.test))))
+  # }
+  # else{
+  # P <- data.frame(lapply(rf_og, predict, newdata = X.test))
+  # PR <- data.frame(lapply(rf_pm, predict, newdata = X.test))
+  # }
   P <- pred_f(rf_og)
   PR <- pred_f(rf_pm)
   Pred_0 <- apply(P, FUN = mean, MARGIN = 1)
@@ -181,7 +206,7 @@ MSE_Test.default <- function(X, y,  X.test = FALSE, y.test = FALSE,
   MSE_R_0 <- mean((Pred_R_0 - y.test)^2)
   diff.0 <- MSE_R_0 - MSE_0
   Pool <- cbind(P, PR)
-  MSE <- data.frame("Full_MSE" = c(0), "Reduced_MSE" = c(0)) # Intialization
+  MSE <- data.frame("Full_MSE" = rep(B, 0), "Reduced_MSE" = rep(B, 0)) # Intialization
   for(i in 1:B){
     samps <- sample(1:(2*NTree), NTree, replace = F)
     P_t <- Pool[,samps]
@@ -240,8 +265,7 @@ MSE_compare <- function(m1, m2, X.test, y.test = NULL, B = 1000, return.preds = 
       if(is.null(y.test)){y.dummy <- rep(0, nrow(X.test))}
       else{y.dummy <- y.test}
       form.resp <- as.formula("y~.")
-      print(ncol( model.matrix(form.resp, data.frame(X.test, "y" = y.dummy))))
-      P <- data.frame(lapply(model, predict, newx = model.matrix(form.resp, data.frame(X.test, "y" = y.dummy))))
+      P <- data.frame(lapply(model, predict, newx = model.matrix(form.resp, data.frame(X.test, "y" = y.test))))
     }
     P
   }
@@ -333,7 +357,7 @@ MSE_compare <- function(m1, m2, X.test, y.test = NULL, B = 1000, return.preds = 
                  "call" = match.call())
   class(result) <- "MSE_Test"
   result
-}
+  }
 
 ####################################
 ### Defining a plot method
@@ -572,6 +596,7 @@ f_holdoutRF <- function(X, y, X.test = FALSE, y.test = FALSE, B = 1000,
   names(tree_var_mat) <- vars
   if(any(ntree_with_var < mintree)) warning("Some models may not have enough base learners, consider running again with more models")
   # Comparing all models with variable X against those without variable X
+  #out_list <- vector(mode  = "list", length = length(vars))
   hold_out_compare <- function(v){
     # Getting the flags of each variable
     flags <- tree_var_mat[[v]]
@@ -605,6 +630,19 @@ f_holdoutRF <- function(X, y, X.test = FALSE, y.test = FALSE, B = 1000,
       MSE_no_v_temp <- mean((y.test - avg_preds_no_v_temp)^2)
       perm_stats[i] <- MSE_no_v_temp - MSE_v_temp
     }
+    
+    #mod_v <- sample(mod_v, min(length(mod_no_v), length(mod_v)))
+    #mod_no_v <- sample(mod_no_v, min(length(mod_no_v), length(mod_v)))
+    
+    
+    #class(mod_v) <- c0
+    #class(mod_no_v) <- c0
+
+    # Comparing the MSE's of each model
+    #obj <- MSE_compare(m1 = mod_no_v, m2 = mod_v, X.test = X.test, y.test = y.test)
+    #results <- cbind(results, c("SDImp" = obj$Importance[1],
+                         #"MSEImp" = obj$originalStat[2] - obj$originalStat[1],
+                  #       "Pval" = obj$Pvalue))
     return( c("SDImp" = (D_0 - mean(perm_stats))/sd(perm_stats),
               "MSEImp" = D_0, "Pval" = mean(c(1, D_0 < perm_stats))))
   }
@@ -623,8 +661,9 @@ f_holdoutRF <- function(X, y, X.test = FALSE, y.test = FALSE, B = 1000,
 }
 
 
+
 ### Definining an Importance Plot Method
-plot.permtestImp <- function(obj, ImpType = "SDImp", col_blind = F){
+plot.permtestImp <- function(obj, ImpType = "SDImp", col_blind = F, returnPlot = F){
   obj <- obj$Importance_Table
   title.perm <- "Permutation Test Importance Measures "
   if(ImpType == "SDImp"){
@@ -684,7 +723,8 @@ plot.permtestImp <- function(obj, ImpType = "SDImp", col_blind = F){
             panel.background = element_rect(fill = "white"),
             panel.grid.major.y = element_line(colour = 'gray', linetype = 2))
   }
-    plot(g)
+    if(!returnPlot) plot(g)
+    if(returnPlot) return(g)
 }
 
 
